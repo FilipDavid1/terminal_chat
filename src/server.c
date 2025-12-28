@@ -180,6 +180,66 @@ static void *client_thread(void *arg) {
     return NULL;
 }
 
+static int accept_handshake(int client_fd, char *username_out) {
+    ChatMessage hello;
+    if (recv_all(client_fd, &hello, sizeof(ChatMessage)) < 0) {
+        return -1;
+    }
+    trim_string(hello.sender, USERNAME_MAX);
+    if (hello.sender[0] == '\0') {
+        return -1;
+    }
+    snprintf(username_out, USERNAME_MAX, "%s", hello.sender);
+    return 0;
+}
+
+static void *accept_thread(void *arg) {
+    (void)arg;
+    while (running) {
+        struct sockaddr_storage client_addr;
+        socklen_t client_len = sizeof(client_addr);
+        int client_fd = accept(server_fd, (struct sockaddr *)&client_addr, &client_len);
+        if (client_fd < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            if (!running) {
+                break;
+            }
+            perror("accept");
+            continue;
+        }
+
+        Client *client = calloc(1, sizeof(Client));
+        if (!client) {
+            close(client_fd);
+            continue;
+        }
+        client->fd = client_fd;
+        client->removed = 0;
+        client->last_activity = time(NULL);
+
+        if (accept_handshake(client_fd, client->username) < 0) {
+            close(client_fd);
+            free(client);
+            continue;
+        }
+
+        add_client(client);
+
+        char text[TEXT_MAX];
+        snprintf(text, sizeof(text), "%s joined", client->username);
+        push_system_message(text, "");
+
+        if (pthread_create(&client->thread, NULL, client_thread, client) != 0) {
+            perror("pthread_create client");
+            remove_client(client, "handler spawn failed", 0);
+            continue;
+        }
+    }
+    return NULL;
+}
+
 static int setup_unix_socket(const char *path) {
     int fd = socket(AF_UNIX, SOCK_STREAM, 0);
     if (fd < 0) {
