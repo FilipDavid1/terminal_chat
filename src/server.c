@@ -34,6 +34,17 @@ static ServerMode server_mode = MODE_UNIX;
 static char server_unix_path[sizeof(((struct sockaddr_un *)0)->sun_path)] = SOCKET_PATH;
 static char server_tcp_port[PORT_STR_LEN] = DEFAULT_TCP_PORT;
 
+static void handle_sigint(int sig) {
+    (void)sig;
+    running = 0;
+    if (server_fd >= 0) {
+        close(server_fd);
+        server_fd = -1;
+    }
+    mq_close(&dispatch_queue);
+    mq_close(&log_queue);
+}
+
 static void trim_string(char *s, size_t len) {
     s[len - 1] = '\0';
     size_t actual = strnlen(s, len);
@@ -305,3 +316,139 @@ static int setup_tcp_socket(const char *port) {
     }
     return fd;
 }
+
+static void *watchdog_thread(void *arg) {
+    (void)arg;
+    const int poll_interval = 5; /* seconds */
+    while (running) {
+        sleep(poll_interval);
+        time_t now = time(NULL);
+
+        Client **to_kick = NULL;
+        size_t count = 0;
+        size_t cap = 0;
+
+        pthread_mutex_lock(&clients_mutex);
+        Client *cur = clients;
+        while (cur) {
+            if (!cur->removed && (now - cur->last_activity) >= inactivity_timeout_sec) {
+                if (count == cap) {
+                    size_t new_cap = cap == 0 ? 8 : cap * 2;
+                    Client **tmp = realloc(to_kick, new_cap * sizeof(Client *));
+                    if (!tmp) {
+                        break;
+                    }
+                    to_kick = tmp;
+                    cap = new_cap;
+                }
+                to_kick[count++] = cur;
+            }
+            cur = cur->next;
+        }
+        pthread_mutex_unlock(&clients_mutex);
+
+        for (size_t i = 0; i < count; i++) {
+            remove_client(to_kick[i], "inactivity", 1);
+        }
+        free(to_kick);
+    }
+    return NULL;
+}
+
+static void join_client_threads(void) {
+    pthread_mutex_lock(&clients_mutex);
+    Client *cur = clients;
+    while (cur) {
+        pthread_t tid = cur->thread;
+        pthread_mutex_unlock(&clients_mutex);
+        pthread_join(tid, NULL);
+        pthread_mutex_lock(&clients_mutex);
+        cur = cur->next;
+    }
+    pthread_mutex_unlock(&clients_mutex);
+}
+
+static void print_usage(const char *prog) {
+    fprintf(stderr, "Usage: %s [--unix PATH | --tcp PORT] [--timeout SECONDS]\n", prog);
+    fprintf(stderr, "Defaults: --unix %s, --tcp %s (if tcp selected), timeout %ld\n",
+            SOCKET_PATH, DEFAULT_TCP_PORT, (long)inactivity_timeout_sec);
+}
+
+int main(int argc, char *argv[]) {
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--unix") == 0 && i + 1 < argc) {
+            server_mode = MODE_UNIX;
+            snprintf(server_unix_path, sizeof(server_unix_path), "%s", argv[++i]);
+        } else if (strcmp(argv[i], "--tcp") == 0 && i + 1 < argc) {
+            server_mode = MODE_TCP;
+            snprintf(server_tcp_port, sizeof(server_tcp_port), "%s", argv[++i]);
+        } else if (strcmp(argv[i], "--timeout") == 0 && i + 1 < argc) {
+            long v = strtol(argv[++i], NULL, 10);
+            if (v > 0) {
+                inactivity_timeout_sec = (time_t)v;
+            }
+        } else {
+            print_usage(argv[0]);
+            return EXIT_FAILURE;
+        }
+    }
+
+    struct sigaction sa;
+    sa.sa_handler = handle_sigint;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = 0;
+    sigaction(SIGINT, &sa, NULL);
+
+    mq_init(&dispatch_queue);
+    mq_init(&log_queue);
+
+    if (server_mode == MODE_TCP) {
+        server_fd = setup_tcp_socket(server_tcp_port);
+    } else {
+        server_fd = setup_unix_socket(server_unix_path);
+    }
+    if (server_fd < 0) {
+        fprintf(stderr, "Failed to start server.\n");
+        return EXIT_FAILURE;
+    }
+
+    if (pthread_create(&logger_thread_id, NULL, logger_thread, NULL) != 0) {
+        perror("pthread_create logger");
+        return EXIT_FAILURE;
+    }
+
+    if (pthread_create(&dispatcher_thread_id, NULL, dispatcher_thread, NULL) != 0) {
+        perror("pthread_create dispatcher");
+        return EXIT_FAILURE;
+    }
+
+    if (pthread_create(&watchdog_thread_id, NULL, watchdog_thread, NULL) != 0) {
+        perror("pthread_create watchdog");
+        return EXIT_FAILURE;
+    }
+
+    if (pthread_create(&accept_thread_id, NULL, accept_thread, NULL) != 0) {
+        perror("pthread_create accept");
+        return EXIT_FAILURE;
+    }
+
+    pthread_join(accept_thread_id, NULL);
+    mq_close(&dispatch_queue);
+    mq_close(&log_queue);
+
+    pthread_join(watchdog_thread_id, NULL);
+    pthread_join(dispatcher_thread_id, NULL);
+    pthread_join(logger_thread_id, NULL);
+    join_client_threads();
+
+    mq_destroy(&dispatch_queue);
+    mq_destroy(&log_queue);
+    if (server_fd >= 0) {
+        close(server_fd);
+    }
+    if (server_mode == MODE_UNIX) {
+        unlink(server_unix_path);
+    }
+    return EXIT_SUCCESS;
+}
+
