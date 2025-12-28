@@ -105,6 +105,81 @@ static int send_message_to_client(Client *client, const ChatMessage *msg) {
     return send_all(client->fd, msg, sizeof(ChatMessage));
 }
 
+static void *dispatcher_thread(void *arg) {
+    (void)arg;
+    ChatMessage msg;
+    while (running && mq_pop(&dispatch_queue, &msg) == 0) {
+        pthread_mutex_lock(&clients_mutex);
+        Client *cur = clients;
+        while (cur) {
+            int deliver = 0;
+            if (msg.target[0] == '\0') {
+                deliver = 1;
+            } else if (strncmp(cur->username, msg.target, USERNAME_MAX) == 0 ||
+                       strncmp(msg.target, cur->username, USERNAME_MAX) == 0) {
+                deliver = 1;
+            }
+
+            if (deliver) {
+                if (send_message_to_client(cur, &msg) < 0) {
+                    shutdown(cur->fd, SHUT_RDWR);
+                }
+            }
+            cur = cur->next;
+        }
+        pthread_mutex_unlock(&clients_mutex);
+    }
+    return NULL;
+}
+
+static void *logger_thread(void *arg) {
+    (void)arg;
+    FILE *fp = fopen("chat.log", "a");
+    if (!fp) {
+        perror("chat.log");
+        return NULL;
+    }
+
+    ChatMessage msg;
+    char timebuf[32];
+    while (mq_pop(&log_queue, &msg) == 0) {
+        struct tm tm_info;
+        localtime_r(&msg.timestamp, &tm_info);
+        strftime(timebuf, sizeof(timebuf), "%H:%M:%S", &tm_info);
+        if (msg.target[0] == '\0') {
+            fprintf(fp, "[%s] <%s> %s\n", timebuf, msg.sender, msg.text);
+        } else {
+            fprintf(fp, "[%s] <%s -> %s> %s\n", timebuf, msg.sender, msg.target, msg.text);
+        }
+        fflush(fp);
+    }
+
+    fclose(fp);
+    return NULL;
+}
+
+static void *client_thread(void *arg) {
+    Client *client = (Client *)arg;
+    ChatMessage msg;
+
+    while (running) {
+        if (recv_all(client->fd, &msg, sizeof(ChatMessage)) < 0) {
+            break;
+        }
+        trim_string(msg.text, TEXT_MAX);
+        msg.text[TEXT_MAX - 1] = '\0';
+        snprintf(msg.sender, USERNAME_MAX, "%s", client->username);
+        msg.timestamp = time(NULL);
+        client->last_activity = msg.timestamp;
+
+        mq_push(&dispatch_queue, &msg);
+        mq_push(&log_queue, &msg);
+    }
+
+    remove_client(client, "disconnected", 0);
+    return NULL;
+}
+
 static int setup_unix_socket(const char *path) {
     int fd = socket(AF_UNIX, SOCK_STREAM, 0);
     if (fd < 0) {
