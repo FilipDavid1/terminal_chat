@@ -22,3 +22,24 @@ int send_all(int fd, const void *buf, size_t len) {
     }
     return 0;
 }
+
+int recv_all(int fd, void *buf, size_t len) {
+    size_t got = 0;
+    char *p = buf;
+    while (got < len) {
+        ssize_t n = recv(fd, p + got, len - got, 0);
+        if (n < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            return -1;
+        }
+        if (n == 0) {
+            return -1;
+        }
+        got += (size_t)n;
+    }
+    return 0;
+}
+
+
