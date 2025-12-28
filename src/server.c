@@ -34,6 +34,77 @@ static ServerMode server_mode = MODE_UNIX;
 static char server_unix_path[sizeof(((struct sockaddr_un *)0)->sun_path)] = SOCKET_PATH;
 static char server_tcp_port[PORT_STR_LEN] = DEFAULT_TCP_PORT;
 
+static void trim_string(char *s, size_t len) {
+    s[len - 1] = '\0';
+    size_t actual = strnlen(s, len);
+    if (actual == 0) {
+        return;
+    }
+    s[actual] = '\0';
+}
+
+static void push_system_message(const char *text, const char *target) {
+    ChatMessage msg;
+    memset(&msg, 0, sizeof(msg));
+    snprintf(msg.sender, USERNAME_MAX, "SYSTEM");
+    if (target) {
+        snprintf(msg.target, USERNAME_MAX, "%s", target);
+    }
+    snprintf(msg.text, TEXT_MAX, "%s", text);
+    msg.timestamp = time(NULL);
+    mq_push(&dispatch_queue, &msg);
+    mq_push(&log_queue, &msg);
+}
+
+static void add_client(Client *client) {
+    pthread_mutex_lock(&clients_mutex);
+    client->next = clients;
+    clients = client;
+    pthread_mutex_unlock(&clients_mutex);
+}
+
+static void remove_client(Client *client, const char *reason, int join_thread) {
+    int already_removed = 0;
+    pthread_mutex_lock(&clients_mutex);
+    Client **cursor = &clients;
+    while (*cursor && *cursor != client) {
+        cursor = &(*cursor)->next;
+    }
+    if (*cursor == client && !client->removed) {
+        *cursor = client->next;
+        client->removed = 1;
+    } else {
+        already_removed = 1;
+    }
+    pthread_mutex_unlock(&clients_mutex);
+
+    if (already_removed) {
+        return;
+    }
+
+    if (reason && reason[0] != '\0') {
+        char text[TEXT_MAX];
+        if (strcmp(reason, "inactivity") == 0) {
+            snprintf(text, sizeof(text), "User %s has been disconnected due to inactivity.", client->username);
+        } else {
+            snprintf(text, sizeof(text), "%s left (%s)", client->username, reason);
+        }
+        push_system_message(text, "");
+    }
+
+    shutdown(client->fd, SHUT_RDWR);
+    close(client->fd);
+
+    if (join_thread) {
+        pthread_join(client->thread, NULL);
+    }
+    free(client);
+}
+
+static int send_message_to_client(Client *client, const ChatMessage *msg) {
+    return send_all(client->fd, msg, sizeof(ChatMessage));
+}
+
 static int setup_unix_socket(const char *path) {
     int fd = socket(AF_UNIX, SOCK_STREAM, 0);
     if (fd < 0) {
