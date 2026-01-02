@@ -124,3 +124,68 @@ static void *receiver_thread(void *arg) {
     }
     return NULL;
 }
+
+static int parse_input_line(const char *line, ChatMessage *out) {
+    memset(out, 0, sizeof(*out));
+    out->timestamp = time(NULL);
+    snprintf(out->sender, USERNAME_MAX, "%s", username);
+
+    if (line[0] == '@') {
+        const char *space = strchr(line, ' ');
+        if (!space || space == line + 1) {
+            fprintf(stderr, "Usage for private: @user message\n");
+            return -1;
+        }
+        size_t user_len = (size_t)(space - line - 1);
+        if (user_len >= USERNAME_MAX) {
+            user_len = USERNAME_MAX - 1;
+        }
+        strncpy(out->target, line + 1, user_len);
+        out->target[user_len] = '\0';
+        snprintf(out->text, TEXT_MAX, "%s", space + 1);
+    } else {
+        snprintf(out->text, TEXT_MAX, "%s", line);
+    }
+    return 0;
+}
+
+static void *input_thread(void *arg) {
+    (void)arg;
+    char *line = NULL;
+    size_t cap = 0;
+    while (running) {
+        ssize_t nread = getline(&line, &cap, stdin);
+        if (nread == -1) {
+            running = 0;
+            break;
+        }
+        strip_newline(line);
+        if (strcmp(line, "/quit") == 0) {
+            running = 0;
+            break;
+        }
+        if (strcmp(line, "/help") == 0) {
+            printf("Commands: /quit, /help, @user message for private\n");
+            continue;
+        }
+        ChatMessage msg;
+        if (parse_input_line(line, &msg) == 0) {
+            if (send_all(server_fd, &msg, sizeof(ChatMessage)) < 0) {
+                fprintf(stderr, "Failed to send message.\n");
+                running = 0;
+                break;
+            }
+        }
+    }
+    free(line);
+    return NULL;
+}
+
+static int send_handshake(void) {
+    ChatMessage hello;
+    memset(&hello, 0, sizeof(hello));
+    snprintf(hello.sender, USERNAME_MAX, "%s", username);
+    snprintf(hello.text, TEXT_MAX, "hello");
+    hello.timestamp = time(NULL);
+    return send_all(server_fd, &hello, sizeof(ChatMessage));
+}
