@@ -189,3 +189,75 @@ static int send_handshake(void) {
     hello.timestamp = time(NULL);
     return send_all(server_fd, &hello, sizeof(ChatMessage));
 }
+
+static void print_usage(const char *prog) {
+    fprintf(stderr, "Usage: %s <username> [--unix PATH | --tcp HOST PORT]\n", prog);
+    fprintf(stderr, "Defaults: --unix %s, --tcp %s:%s\n",
+            SOCKET_PATH, server_tcp_host, server_tcp_port);
+}
+
+int main(int argc, char *argv[]) {
+    if (argc < 2) {
+        print_usage(argv[0]);
+        return EXIT_FAILURE;
+    }
+    snprintf(username, USERNAME_MAX, "%s", argv[1]);
+
+    for (int i = 2; i < argc; i++) {
+        if (strcmp(argv[i], "--unix") == 0 && i + 1 < argc) {
+            client_mode = MODE_UNIX;
+            snprintf(server_unix_path, sizeof(server_unix_path), "%s", argv[++i]);
+        } else if (strcmp(argv[i], "--tcp") == 0 && i + 2 < argc) {
+            client_mode = MODE_TCP;
+            snprintf(server_tcp_host, sizeof(server_tcp_host), "%s", argv[++i]);
+            snprintf(server_tcp_port, sizeof(server_tcp_port), "%s", argv[++i]);
+        } else {
+            print_usage(argv[0]);
+            return EXIT_FAILURE;
+        }
+    }
+
+    struct sigaction sa;
+    sa.sa_handler = handle_sigint;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = 0;
+    sigaction(SIGINT, &sa, NULL);
+
+    if (client_mode == MODE_TCP) {
+        server_fd = connect_tcp_socket(server_tcp_host, server_tcp_port);
+    } else {
+        server_fd = connect_unix_socket(server_unix_path);
+    }
+    if (server_fd < 0) {
+        return EXIT_FAILURE;
+    }
+
+    if (send_handshake() < 0) {
+        fprintf(stderr, "Failed to send handshake.\n");
+        close(server_fd);
+        return EXIT_FAILURE;
+    }
+
+    pthread_t recv_tid;
+    pthread_t input_tid;
+    if (pthread_create(&recv_tid, NULL, receiver_thread, NULL) != 0) {
+        perror("pthread_create recv");
+        close(server_fd);
+        return EXIT_FAILURE;
+    }
+    if (pthread_create(&input_tid, NULL, input_thread, NULL) != 0) {
+        perror("pthread_create input");
+        running = 0;
+    }
+
+    pthread_join(input_tid, NULL);
+    running = 0;
+    shutdown(server_fd, SHUT_RDWR);
+    pthread_join(recv_tid, NULL);
+
+    close(server_fd);
+    return EXIT_SUCCESS;
+}
+
+
+
