@@ -85,3 +85,42 @@ static int connect_tcp_socket(const char *host, const char *port) {
     }
     return fd;
 }
+
+static void strip_newline(char *s) {
+    size_t len = strlen(s);
+    if (len > 0 && s[len - 1] == '\n') {
+        s[len - 1] = '\0';
+    }
+}
+
+static void format_time(time_t ts, char *buf, size_t len) {
+    struct tm tm_info;
+    localtime_r(&ts, &tm_info);
+    strftime(buf, len, "%H:%M:%S", &tm_info);
+}
+
+static void *receiver_thread(void *arg) {
+    (void)arg;
+    ChatMessage msg;
+    char timebuf[32];
+    while (running) {
+        if (recv_all(server_fd, &msg, sizeof(ChatMessage)) < 0) {
+            fprintf(stderr, "Connection lost.\n");
+            running = 0;
+            break;
+        }
+        msg.sender[USERNAME_MAX - 1] = '\0';
+        msg.target[USERNAME_MAX - 1] = '\0';
+        msg.text[TEXT_MAX - 1] = '\0';
+        format_time(msg.timestamp, timebuf, sizeof(timebuf));
+        if (msg.target[0] && strncmp(msg.target, username, USERNAME_MAX) == 0) {
+            printf("[%s] (private) <%s> %s\n", timebuf, msg.sender, msg.text);
+        } else if (msg.target[0]) {
+            printf("[%s] <%s -> %s> %s\n", timebuf, msg.sender, msg.target, msg.text);
+        } else {
+            printf("[%s] <%s> %s\n", timebuf, msg.sender, msg.text);
+        }
+        fflush(stdout);
+    }
+    return NULL;
+}
