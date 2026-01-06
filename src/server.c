@@ -16,6 +16,16 @@
 #include "queue.h"
 #include "server.h"
 
+/* Client structure - internal implementation detail, not exposed in header */
+typedef struct Client {
+    int fd;
+    char username[USERNAME_MAX];
+    pthread_t thread;
+    time_t last_activity;
+    int removed;
+    struct Client *next;
+} Client;
+
 static int server_fd = -1;
 static volatile sig_atomic_t running = 1;
 static pthread_t accept_thread_id;
@@ -26,8 +36,8 @@ static pthread_t watchdog_thread_id;
 static pthread_mutex_t clients_mutex = PTHREAD_MUTEX_INITIALIZER;
 static Client *clients = NULL;
 
-static MessageQueue dispatch_queue;
-static MessageQueue log_queue;
+static MessageQueue *dispatch_queue = NULL;
+static MessageQueue *log_queue = NULL;
 
 static time_t inactivity_timeout_sec = 300; /* default 5 minutes */
 static ServerMode server_mode = MODE_UNIX;
@@ -41,8 +51,12 @@ static void handle_sigint(int sig) {
         close(server_fd);
         server_fd = -1;
     }
-    mq_close(&dispatch_queue);
-    mq_close(&log_queue);
+    if (dispatch_queue) {
+        mq_close(dispatch_queue);
+    }
+    if (log_queue) {
+        mq_close(log_queue);
+    }
 }
 
 static void trim_string(char *s, size_t len) {
@@ -63,8 +77,8 @@ static void push_system_message(const char *text, const char *target) {
     }
     snprintf(msg.text, TEXT_MAX, "%s", text);
     msg.timestamp = time(NULL);
-    mq_push(&dispatch_queue, &msg);
-    mq_push(&log_queue, &msg);
+    mq_push(dispatch_queue, &msg);
+    mq_push(log_queue, &msg);
 }
 
 static void add_client(Client *client) {
@@ -119,7 +133,7 @@ static int send_message_to_client(Client *client, const ChatMessage *msg) {
 static void *dispatcher_thread(void *arg) {
     (void)arg;
     ChatMessage msg;
-    while (running && mq_pop(&dispatch_queue, &msg) == 0) {
+    while (running && mq_pop(dispatch_queue, &msg) == 0) {
         pthread_mutex_lock(&clients_mutex);
         Client *cur = clients;
         while (cur) {
@@ -153,7 +167,7 @@ static void *logger_thread(void *arg) {
 
     ChatMessage msg;
     char timebuf[32];
-    while (mq_pop(&log_queue, &msg) == 0) {
+    while (mq_pop(log_queue, &msg) == 0) {
         struct tm tm_info;
         localtime_r(&msg.timestamp, &tm_info);
         strftime(timebuf, sizeof(timebuf), "%H:%M:%S", &tm_info);
@@ -183,8 +197,8 @@ static void *client_thread(void *arg) {
         msg.timestamp = time(NULL);
         client->last_activity = msg.timestamp;
 
-        mq_push(&dispatch_queue, &msg);
-        mq_push(&log_queue, &msg);
+        mq_push(dispatch_queue, &msg);
+        mq_push(log_queue, &msg);
     }
 
     remove_client(client, "disconnected", 0);
@@ -399,8 +413,12 @@ int main(int argc, char *argv[]) {
     sa.sa_flags = 0;
     sigaction(SIGINT, &sa, NULL);
 
-    mq_init(&dispatch_queue);
-    mq_init(&log_queue);
+    dispatch_queue = mq_create();
+    log_queue = mq_create();
+    if (!dispatch_queue || !log_queue) {
+        fprintf(stderr, "Failed to create message queues.\n");
+        return EXIT_FAILURE;
+    }
 
     if (server_mode == MODE_TCP) {
         server_fd = setup_tcp_socket(server_tcp_port);
@@ -433,16 +451,20 @@ int main(int argc, char *argv[]) {
     }
 
     pthread_join(accept_thread_id, NULL);
-    mq_close(&dispatch_queue);
-    mq_close(&log_queue);
+    if (dispatch_queue) {
+        mq_close(dispatch_queue);
+    }
+    if (log_queue) {
+        mq_close(log_queue);
+    }
 
     pthread_join(watchdog_thread_id, NULL);
     pthread_join(dispatcher_thread_id, NULL);
     pthread_join(logger_thread_id, NULL);
     join_client_threads();
 
-    mq_destroy(&dispatch_queue);
-    mq_destroy(&log_queue);
+    mq_destroy(dispatch_queue);
+    mq_destroy(log_queue);
     if (server_fd >= 0) {
         close(server_fd);
     }

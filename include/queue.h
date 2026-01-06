@@ -1,28 +1,19 @@
 #ifndef QUEUE_H
 #define QUEUE_H
 
-#include <pthread.h>
-
 #include "chat.h"
 
-typedef struct MessageNode {
-    ChatMessage msg;
-    struct MessageNode *next;
-} MessageNode;
+/* Opaque pointer - internal structure hidden from users */
+typedef struct MessageQueue MessageQueue;
 
-typedef struct MessageQueue {
-    MessageNode *head;
-    MessageNode *tail;
-    pthread_mutex_t mutex;
-    pthread_cond_t cond;
-    int closed;
-} MessageQueue;
+/* Create and destroy queue */
+MessageQueue *mq_create(void);
+void mq_destroy(MessageQueue *queue);
 
-void mq_init(MessageQueue *queue);
+/* Queue operations */
 void mq_push(MessageQueue *queue, const ChatMessage *msg);
 int mq_pop(MessageQueue *queue, ChatMessage *out); /* returns 0 on success, -1 if closed */
 void mq_close(MessageQueue *queue);
-void mq_destroy(MessageQueue *queue);
 
 #endif
 

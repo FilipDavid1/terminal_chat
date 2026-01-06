@@ -1,14 +1,35 @@
 #include <stdlib.h>
 #include <string.h>
+#include <pthread.h>
 
 #include "queue.h"
 
-void mq_init(MessageQueue *queue) {
+/* Internal node structure - not exposed in header */
+typedef struct MessageNode {
+    ChatMessage msg;
+    struct MessageNode *next;
+} MessageNode;
+
+/* Internal queue structure - not exposed in header */
+struct MessageQueue {
+    MessageNode *head;
+    MessageNode *tail;
+    pthread_mutex_t mutex;
+    pthread_cond_t cond;
+    int closed;
+};
+
+MessageQueue *mq_create(void) {
+    MessageQueue *queue = malloc(sizeof(MessageQueue));
+    if (!queue) {
+        return NULL;
+    }
     queue->head = NULL;
     queue->tail = NULL;
     queue->closed = 0;
     pthread_mutex_init(&queue->mutex, NULL);
     pthread_cond_init(&queue->cond, NULL);
+    return queue;
 }
 
 void mq_push(MessageQueue *queue, const ChatMessage *msg) {
@@ -67,6 +88,9 @@ void mq_close(MessageQueue *queue) {
 }
 
 void mq_destroy(MessageQueue *queue) {
+    if (!queue) {
+        return;
+    }
     pthread_mutex_lock(&queue->mutex);
     MessageNode *node = queue->head;
     while (node) {
@@ -78,6 +102,7 @@ void mq_destroy(MessageQueue *queue) {
     pthread_mutex_unlock(&queue->mutex);
     pthread_mutex_destroy(&queue->mutex);
     pthread_cond_destroy(&queue->cond);
+    free(queue);
 }
 
 
